@@ -1,0 +1,236 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+
+% ---------------------------------------------------
+% Title Page Information
+% ---------------------------------------------------
+\title[DifFace \& Variable $\eta$ Inference]{DifFace: Blind Face Restoration with Diffused Error Contraction}
+\subtitle{Implementation, Inpainting, and Fidelity-Realism Trade-off \\ Group-46}
+\author{Saksham Sharma(202311016), Pradeep Saran(202311066), Shailendra Singh Mandal(202311078)}
+\institute[B.Tech CSE]{
+    Department of Computer Science and Engineering \\
+    Batch of 2023--2027
+}
+\date{April 2026}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+\begin{frame}{Outline}
+    \tableofcontents
+\end{frame}
+
+% ---------------------------------------------------
+% Section 1: Introduction
+% ---------------------------------------------------
+\section{Introduction}
+
+\begin{frame}{The Ill-Posed Problem of BFR}
+    \textbf{Objective:} Recover a High-Quality (HQ) face $x_0$ from a Low-Quality (LQ) observation $y$.
+    
+    \vspace{0.3cm}
+    The degradation model is typically expressed as:
+    \begin{equation}
+        y = (x_0 \circledast k) \downarrow_s + n
+    \end{equation}
+    where $k$ is an unknown blur kernel, $\downarrow_s$ is downsampling, and $n$ is noise.
+    
+    \vspace{0.3cm}
+    \textbf{Challenge:} Because the degradation is highly destructive, multiple valid HQ faces can map to the same LQ input. Previous GAN methods often hallucinate incorrect identities when guessing missing details.
+\end{frame}
+
+% ---------------------------------------------------
+% Section 2: Core Theory & Pipeline
+% ---------------------------------------------------
+\section{Core Theory \& Pipeline}
+
+\begin{frame}{The Core Theorem: Diffused Error Contraction}
+    Instead of mapping $y \to x_0$ directly, we observe errors in the diffusion space. Let $\hat{x}_0$ be a preliminary estimate of the HQ image. 
+    
+    Applying the forward diffusion process to the ground truth $x_0$ and the estimate $\hat{x}_0$:
+    \begin{equation}
+        || x_t - \hat{x}_t || = \sqrt{\bar{\alpha}_t} || x_0 - \hat{x}_0 ||
+    \end{equation}
+    
+    As $t \to N$, the scaling factor $\sqrt{\bar{\alpha}_t}$ shrinks, effectively "washing out" the structural errors and artifacts of the preliminary estimate.
+\end{frame}
+
+\begin{frame}{Complete Architecture \& Models Pipeline}
+    \begin{block}{1. The Estimator Network ($f_\phi$)}
+        \begin{itemize}
+            \item \textbf{Architecture:} Lightweight network taking the raw LQ image $y$ to generate $\hat{x}_0$.
+            \item \textbf{Training Objective:} Supervised solely with L1 Loss ($||x_0 - \hat{x}_0||_1$). Captures low-frequency structure but lacks realism.
+        \end{itemize}
+    \end{block}
+    
+    \begin{block}{2. The Transition Phase (Mathematical Error Contraction)}
+        \begin{itemize}
+            \item \textbf{Operation:} Diffuse the estimate to an intermediate step $N$: $x_N = \sqrt{\bar{\alpha}_N} \hat{x}_0 + \sqrt{1 - \bar{\alpha}_N} \epsilon$.
+            \item \textbf{Purpose:} Analytically dissolves the L1 errors.
+        \end{itemize}
+    \end{block}
+
+    \begin{block}{3. The Generative Prior Network ($\epsilon_\theta$)}
+        \begin{itemize}
+            \item \textbf{Architecture:} Unconditional Pretrained DDPM U-Net.
+            \item \textbf{Operation:} Takes $x_N$ and iteratively denoises it back to the final HQ image $x_0$.
+        \end{itemize}
+    \end{block}
+\end{frame}
+
+% ---------------------------------------------------
+% Section 3: Face Image Inpainting Extension
+% ---------------------------------------------------
+\section{Extension: Face Image Inpainting}
+
+\begin{frame}{Extension: Face Image Inpainting}
+    
+    
+    Beyond simple blur/noise, DifFace is highly effective at \textbf{Face Image Inpainting} (filling in large masked or corrupted regions).
+    
+    \vspace{0.2cm}
+    \textbf{How the pipeline adapts:}
+    \begin{itemize}
+        \item \textbf{Coarse Filling:} The Estimator Network $f_\phi$ predicts the missing pixels within the masked region, creating a structurally complete but often artificial-looking patch ($\hat{x}_0$).
+        \item \textbf{Diffusing the Seams:} When $\hat{x}_0$ is pushed to diffusion step $N$, the artificial boundaries (seams) between the original unmasked pixels and the newly generated patch are statistically contracted and smoothed out.
+        \item \textbf{Harmonized Generation:} The reverse DDPM process denoises the entire image uniformly, ensuring that the previously masked region matches the high-frequency skin texture, lighting, and global harmony of the unmasked face perfectly.
+    \end{itemize}
+\end{frame}
+
+% ---------------------------------------------------
+% Section 4: Deep Dive: Architectures & Stack
+% ---------------------------------------------------
+\section{Deep Dive: Architectures \& Technology Stack}
+
+\begin{frame}{Estimator Architecture: SwinIR}
+    To generate the preliminary estimate $\hat{x}_0$, the pipeline utilizes a \textbf{Swin Transformer for Image Restoration (SwinIR)}.
+    
+    \vspace{0.2cm}
+    \textbf{Core Components:}
+    \begin{itemize}
+        \item \textbf{Shallow Feature Extraction:} Initial $3 \times 3$ convolutional layers to preserve low-frequency facial structures.
+        \item \textbf{Deep Feature Extraction (RSTB):} Uses Residual Swin Transformer Blocks.
+        \item \textbf{Shifted Window Attention:} Unlike standard ViTs that compute global self-attention (which is $O(N^2)$), SwinIR computes attention within local windows and shifts them. This allows it to capture long-range dependencies computationally efficiently.
+        \item \textbf{Output Module:} Sub-pixel convolution layers to reconstruct the feature maps back to the image space.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Generative Prior Architecture: DDPM U-Net}
+    The reverse denoising step relies on a \textbf{Time-Conditioned U-Net}.
+    
+    \vspace{0.2cm}
+    \textbf{Internal Layer Mechanics:}
+    \begin{itemize}
+        \item \textbf{Residual Blocks:} Deep stack of ResNet blocks utilizing \texttt{GroupNorm} and \texttt{SiLU} (Swish) activation functions.
+        \item \textbf{Timestep Embedding:} The current diffusion timestep $t$ is encoded using Sinusoidal Positional Embeddings and injected into every residual block via an MLP. This tells the network "how noisy" the current image is.
+        \item \textbf{Spatial Self-Attention:} At lower resolution bottleneck layers (e.g., $16 \times 16$), multi-head self-attention mechanisms are applied to maintain global facial coherence.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Implementation \& Training Details}
+    \textbf{Generative Prior (DDPM U-Net Backbone):}
+    \begin{itemize}
+        \item \textbf{Architecture:} Standard DDPM U-Net with attention blocks at multiple resolutions.
+        \item \textbf{Training Status:} The unconditional prior U-Net model was successfully trained to \textbf{100,000 iterations}.
+        \item \textbf{Optimization:} Logged loss values and implemented learning rate adjustments during the training phase.
+    \end{itemize}
+    
+    \textbf{Estimator Network \& Inference:}
+    \begin{itemize}
+        \item Estimator maps unknown degradations to the preliminary facial manifold.
+        \item Starting diffusion timestep $N$ is strategically selected to balance error contraction and structure preservation.
+        \item Dynamic $\eta$ inference loop executed efficiently without requiring generative retraining.
+    \end{itemize}
+\end{frame}
+
+% ---------------------------------------------------
+% Section 5: User's Custom Implementation
+% ---------------------------------------------------
+\section{Custom Feature: Variable $\eta$ Inference}
+
+\begin{frame}{Custom Implementation: Variable $\eta$ Injection}
+    I modified the reverse inference step using the generalized DDIM formulation to allow a user-defined $\eta \in [0, 1]$.
+    
+    \begin{equation}
+        x_{t-1} = \sqrt{\bar{\alpha}_{t-1}} \left( \frac{x_t - \sqrt{1-\bar{\alpha}_t}\epsilon_\theta(x_t, t)}{\sqrt{\bar{\alpha}_t}} \right) + \sqrt{1-\bar{\alpha}_{t-1} - \sigma_t^2} \epsilon_\theta(x_t, t) + \sigma_t \epsilon
+    \end{equation}
+    
+    Where the variance $\sigma_t$ is controlled dynamically:
+    \begin{equation}
+        \sigma_t = \eta \sqrt{\frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}} \sqrt{1 - \frac{\bar{\alpha}_t}{\bar{\alpha}_{t-1}}}
+    \end{equation}
+\end{frame}
+
+\begin{frame}{The Fidelity-Realism Trade-off}
+    \begin{itemize}
+        \item \textbf{$\eta = 1.0$ (DDPM Mode - High Realism):} \\
+        Maximizes stochastic noise $\sigma_t$. Relies heavily on the U-Net prior to generate hyper-realistic textures (pores, hair).
+        
+        \vspace{0.2cm}
+        \item \textbf{$\eta = 0.0$ (DDIM Mode - High Fidelity):} \\
+        Sets $\sigma_t = 0$. The reverse trajectory strictly follows the structural conditioning of the SwinIR estimate. Best for exact identity preservation on severe degradations and precise patch boundaries in inpainting.
+    \end{itemize}
+\end{frame}
+
+% ---------------------------------------------------
+% Section 6: Zero-Retraining Pipeline Enhancements
+% ---------------------------------------------------
+\section{Zero-Retraining Enhancements}
+
+\begin{frame}{Delta 1: Degradation-Aware Dynamic N Selection}
+    \textbf{Problem:} The original DifFace standardizes a fixed starting diffusion timestep (e.g., $N=400$ in original domain) for all inputs. This over-smooths mild degradations and under-smooths severe ones.
+    
+    \vspace{0.2cm}
+    \textbf{Solution:} Dynamically estimate image severity and map it to $N$:
+    \begin{itemize}
+        \item \textbf{Blur Detection:} Computed via Laplacian Variance (weight: 65\%).
+        \item \textbf{Noise Estimation:} Computed via Difference of Gaussians (weight: 35\%).
+        \item \textbf{Adaptive Mapping:} Derives a severity score $\in [0, 1]$ and maps it linearly to a timestep $N \in [250, 500]$, adapting directly to the input's needs.
+    \end{itemize}
+    
+    \vspace{0.2cm}
+    \textbf{Impact:} Fully automated mechanism that preserves details on clean images while enforcing strict error contraction on highly degraded inputs.
+\end{frame}
+
+\begin{frame}{Delta 2: Best-of-N Ensemble Selection}
+    \textbf{Problem:} Diffusion models exhibit stochastic diversity. A single fixed-seed inference might hallucinate unwanted artifacts or suboptimal facial features.
+    
+    \vspace{0.2cm}
+    \textbf{Exploration \& Solution:}
+    \begin{itemize}
+        \item \textbf{Pixel-space Averaging (Failed):} Averaging multiple seeds blurs features because outputs are semantically diverse (unaligned edges).
+        \item \textbf{Best-of-N Strategy (Success):} Run inference $N$ times (e.g., 5 seeds). Evaluate each output's exact sharpness (Laplacian variance), and automatically select the sharpest sample.
+    \end{itemize}
+    
+    \vspace{0.2cm}
+    \textbf{Impact:} Genuinely outperforms the paper's single-seed baseline by \textbf{+26\% to +43\%} in sharpness by exploiting stochastic diversity, ensuring the final output is the optimal structural candidate.
+\end{frame}
+
+% ---------------------------------------------------
+% Section 7: Conclusion
+% ---------------------------------------------------
+\begin{frame}{Conclusion}
+    \begin{itemize}
+        \item \textbf{Mathematical Robustness:} Diffused error contraction fundamentally solves the degradation mismatch problem seen in standard GAN and conditional diffusion models.
+        \item \textbf{Broad Applicability:} Effectively handles both Blind Face Restoration and seamless Face Image Inpainting using the same framework.
+        \item \textbf{Architectural Synergy:} SwinIR effectively maps local/global structures, while the DDPM U-Net synthesizes high-frequency details.
+        \item \textbf{Algorithmic Flexibility:} The custom $\eta$ implementation grants dynamic control over the restoration trajectory, allowing real-time adjustment between identity fidelity and photorealism.
+    \end{itemize}
+    
+    \vspace{0.5cm}
+    \begin{center}
+        \textbf{Thank You.} \\
+        \textit{Questions?}
+    \end{center}
+\end{frame}
+
+\end{document}
